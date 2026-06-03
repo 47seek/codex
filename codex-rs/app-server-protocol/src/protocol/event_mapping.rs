@@ -4,6 +4,7 @@ use crate::protocol::item_builders::build_command_execution_end_item;
 use crate::protocol::item_builders::convert_patch_changes;
 use crate::protocol::v2::AgentMessageDeltaNotification;
 use crate::protocol::v2::CollabAgentState;
+use crate::protocol::v2::CollabAgentStatus;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
 use crate::protocol::v2::CommandExecutionOutputDeltaNotification;
@@ -104,7 +105,11 @@ pub fn item_event_to_server_notification(
             let (receiver_thread_ids, agents_states) = match end_event.new_thread_id {
                 Some(id) => {
                     let receiver_id = id.to_string();
-                    let received_status = CollabAgentState::from(end_event.status.clone());
+                    let received_status = CollabAgentState::from(end_event.status.clone())
+                        .with_agent_metadata(
+                            end_event.new_agent_nickname.clone(),
+                            end_event.new_agent_role.clone(),
+                        );
                     (
                         vec![receiver_id.clone()],
                         [(receiver_id, received_status)].into_iter().collect(),
@@ -159,7 +164,10 @@ pub fn item_event_to_server_notification(
                 _ => CollabAgentToolCallStatus::Completed,
             };
             let receiver_id = end_event.receiver_thread_id.to_string();
-            let received_status = CollabAgentState::from(end_event.status);
+            let received_status = CollabAgentState::from(end_event.status).with_agent_metadata(
+                end_event.receiver_agent_nickname,
+                end_event.receiver_agent_role,
+            );
             let item = ThreadItem::CollabAgentToolCall {
                 id: end_event.call_id,
                 tool: CollabAgentTool::SendInput,
@@ -184,6 +192,21 @@ pub fn item_event_to_server_notification(
                 .iter()
                 .map(ToString::to_string)
                 .collect();
+            let agents_states = begin_event
+                .receiver_agents
+                .iter()
+                .map(|agent| {
+                    (
+                        agent.thread_id.to_string(),
+                        CollabAgentState {
+                            status: CollabAgentStatus::Running,
+                            message: None,
+                            agent_nickname: agent.agent_nickname.clone(),
+                            agent_role: agent.agent_role.clone(),
+                        },
+                    )
+                })
+                .collect();
             let item = ThreadItem::CollabAgentToolCall {
                 id: begin_event.call_id,
                 tool: CollabAgentTool::Wait,
@@ -193,7 +216,7 @@ pub fn item_event_to_server_notification(
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
-                agents_states: HashMap::new(),
+                agents_states,
             };
             ServerNotification::ItemStarted(ItemStartedNotification {
                 thread_id,
@@ -215,10 +238,28 @@ pub fn item_event_to_server_notification(
                 CollabAgentToolCallStatus::Completed
             };
             let receiver_thread_ids = end_event.statuses.keys().map(ToString::to_string).collect();
+            let agent_metadata = end_event
+                .agent_statuses
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.thread_id,
+                        (entry.agent_nickname.clone(), entry.agent_role.clone()),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
             let agents_states = end_event
                 .statuses
                 .iter()
-                .map(|(id, status)| (id.to_string(), CollabAgentState::from(status.clone())))
+                .map(|(id, status)| {
+                    let (agent_nickname, agent_role) =
+                        agent_metadata.get(id).cloned().unwrap_or_default();
+                    (
+                        id.to_string(),
+                        CollabAgentState::from(status.clone())
+                            .with_agent_metadata(agent_nickname, agent_role),
+                    )
+                })
                 .collect();
             let item = ThreadItem::CollabAgentToolCall {
                 id: end_event.call_id,
@@ -268,7 +309,10 @@ pub fn item_event_to_server_notification(
             let receiver_id = end_event.receiver_thread_id.to_string();
             let agents_states = [(
                 receiver_id.clone(),
-                CollabAgentState::from(end_event.status),
+                CollabAgentState::from(end_event.status).with_agent_metadata(
+                    end_event.receiver_agent_nickname,
+                    end_event.receiver_agent_role,
+                ),
             )]
             .into_iter()
             .collect();
@@ -320,7 +364,10 @@ pub fn item_event_to_server_notification(
             let receiver_id = end_event.receiver_thread_id.to_string();
             let agents_states = [(
                 receiver_id.clone(),
-                CollabAgentState::from(end_event.status),
+                CollabAgentState::from(end_event.status).with_agent_metadata(
+                    end_event.receiver_agent_nickname,
+                    end_event.receiver_agent_role,
+                ),
             )]
             .into_iter()
             .collect();
@@ -453,8 +500,10 @@ pub fn item_event_to_server_notification(
 mod tests {
     use super::*;
     use codex_protocol::ThreadId;
+    use codex_protocol::protocol::CollabAgentRef;
     use codex_protocol::protocol::CollabResumeBeginEvent;
     use codex_protocol::protocol::CollabResumeEndEvent;
+    use codex_protocol::protocol::CollabWaitingBeginEvent;
     use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
     use codex_protocol::protocol::ExecOutputStream;
     use pretty_assertions::assert_eq;
@@ -489,6 +538,58 @@ mod tests {
             }
             other => panic!("expected command execution output delta, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collab_waiting_begin_preserves_receiver_agent_metadata() {
+        let sender_thread_id = ThreadId::new();
+        let receiver_thread_id = ThreadId::new();
+        let event = CollabWaitingBeginEvent {
+            call_id: "wait-1".to_string(),
+            started_at_ms: 123,
+            sender_thread_id,
+            receiver_thread_ids: vec![receiver_thread_id],
+            receiver_agents: vec![CollabAgentRef {
+                thread_id: receiver_thread_id,
+                agent_nickname: Some("Hypatia".to_string()),
+                agent_role: Some("explorer".to_string()),
+            }],
+        };
+
+        let notification = item_event_to_server_notification(
+            EventMsg::CollabWaitingBegin(event.clone()),
+            "thread-1",
+            "turn-1",
+        );
+        assert_item_started_server_notification(
+            notification,
+            ItemStartedNotification {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                started_at_ms: event.started_at_ms,
+                item: ThreadItem::CollabAgentToolCall {
+                    id: event.call_id,
+                    tool: CollabAgentTool::Wait,
+                    status: CollabAgentToolCallStatus::InProgress,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: [(
+                        receiver_thread_id.to_string(),
+                        CollabAgentState {
+                            status: CollabAgentStatus::Running,
+                            message: None,
+                            agent_nickname: Some("Hypatia".to_string()),
+                            agent_role: Some("explorer".to_string()),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            },
+        );
     }
 
     #[test]

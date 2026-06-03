@@ -6711,6 +6711,18 @@
       },
       "CollabAgentState": {
         "properties": {
+          "agentNickname": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "agentRole": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
           "message": {
             "type": [
               "string",

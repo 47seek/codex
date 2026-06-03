@@ -1023,6 +1023,24 @@ pub enum CollabAgentStatus {
 pub struct CollabAgentState {
     pub status: CollabAgentStatus,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = false)]
+    pub agent_nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = false)]
+    pub agent_role: Option<String>,
+}
+
+impl CollabAgentState {
+    pub(crate) fn with_agent_metadata(
+        mut self,
+        agent_nickname: Option<String>,
+        agent_role: Option<String>,
+    ) -> Self {
+        self.agent_nickname = agent_nickname;
+        self.agent_role = agent_role;
+        self
+    }
 }
 
 impl From<CoreAgentStatus> for CollabAgentState {
@@ -1031,30 +1049,44 @@ impl From<CoreAgentStatus> for CollabAgentState {
             CoreAgentStatus::PendingInit => Self {
                 status: CollabAgentStatus::PendingInit,
                 message: None,
+                agent_nickname: None,
+                agent_role: None,
             },
             CoreAgentStatus::Running => Self {
                 status: CollabAgentStatus::Running,
                 message: None,
+                agent_nickname: None,
+                agent_role: None,
             },
             CoreAgentStatus::Interrupted => Self {
                 status: CollabAgentStatus::Interrupted,
                 message: None,
+                agent_nickname: None,
+                agent_role: None,
             },
             CoreAgentStatus::Completed(message) => Self {
                 status: CollabAgentStatus::Completed,
                 message,
+                agent_nickname: None,
+                agent_role: None,
             },
             CoreAgentStatus::Errored(message) => Self {
                 status: CollabAgentStatus::Errored,
                 message: Some(message),
+                agent_nickname: None,
+                agent_role: None,
             },
             CoreAgentStatus::Shutdown => Self {
                 status: CollabAgentStatus::Shutdown,
                 message: None,
+                agent_nickname: None,
+                agent_role: None,
             },
             CoreAgentStatus::NotFound => Self {
                 status: CollabAgentStatus::NotFound,
                 message: None,
+                agent_nickname: None,
+                agent_role: None,
             },
         }
     }

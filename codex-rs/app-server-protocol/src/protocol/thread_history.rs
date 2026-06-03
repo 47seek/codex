@@ -5,6 +5,7 @@ use crate::protocol::item_builders::build_file_change_begin_item;
 use crate::protocol::item_builders::build_file_change_end_item;
 use crate::protocol::item_builders::build_item_from_guardian_event;
 use crate::protocol::v2::CollabAgentState;
+use crate::protocol::v2::CollabAgentStatus;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
 use crate::protocol::v2::CommandExecutionStatus;
@@ -640,7 +641,11 @@ impl ThreadHistoryBuilder {
         let (receiver_thread_ids, agents_states) = match &payload.new_thread_id {
             Some(id) => {
                 let receiver_id = id.to_string();
-                let received_status = CollabAgentState::from(payload.status.clone());
+                let received_status = CollabAgentState::from(payload.status.clone())
+                    .with_agent_metadata(
+                        payload.new_agent_nickname.clone(),
+                        payload.new_agent_role.clone(),
+                    );
                 (
                     vec![receiver_id.clone()],
                     [(receiver_id, received_status)].into_iter().collect(),
@@ -688,7 +693,10 @@ impl ThreadHistoryBuilder {
             _ => CollabAgentToolCallStatus::Completed,
         };
         let receiver_id = payload.receiver_thread_id.to_string();
-        let received_status = CollabAgentState::from(payload.status.clone());
+        let received_status = CollabAgentState::from(payload.status.clone()).with_agent_metadata(
+            payload.receiver_agent_nickname.clone(),
+            payload.receiver_agent_role.clone(),
+        );
         self.upsert_item_in_current_turn(ThreadItem::CollabAgentToolCall {
             id: payload.call_id.clone(),
             tool: CollabAgentTool::SendInput,
@@ -706,6 +714,21 @@ impl ThreadHistoryBuilder {
         &mut self,
         payload: &codex_protocol::protocol::CollabWaitingBeginEvent,
     ) {
+        let agents_states = payload
+            .receiver_agents
+            .iter()
+            .map(|agent| {
+                (
+                    agent.thread_id.to_string(),
+                    CollabAgentState {
+                        status: CollabAgentStatus::Running,
+                        message: None,
+                        agent_nickname: agent.agent_nickname.clone(),
+                        agent_role: agent.agent_role.clone(),
+                    },
+                )
+            })
+            .collect();
         let item = ThreadItem::CollabAgentToolCall {
             id: payload.call_id.clone(),
             tool: CollabAgentTool::Wait,
@@ -719,7 +742,7 @@ impl ThreadHistoryBuilder {
             prompt: None,
             model: None,
             reasoning_effort: None,
-            agents_states: HashMap::new(),
+            agents_states,
         };
         self.upsert_item_in_current_turn(item);
     }
@@ -740,10 +763,28 @@ impl ThreadHistoryBuilder {
         let mut receiver_thread_ids: Vec<String> =
             payload.statuses.keys().map(ToString::to_string).collect();
         receiver_thread_ids.sort();
+        let agent_metadata = payload
+            .agent_statuses
+            .iter()
+            .map(|entry| {
+                (
+                    entry.thread_id,
+                    (entry.agent_nickname.clone(), entry.agent_role.clone()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let agents_states = payload
             .statuses
             .iter()
-            .map(|(id, status)| (id.to_string(), CollabAgentState::from(status.clone())))
+            .map(|(id, status)| {
+                let (agent_nickname, agent_role) =
+                    agent_metadata.get(id).cloned().unwrap_or_default();
+                (
+                    id.to_string(),
+                    CollabAgentState::from(status.clone())
+                        .with_agent_metadata(agent_nickname, agent_role),
+                )
+            })
             .collect();
         self.upsert_item_in_current_turn(ThreadItem::CollabAgentToolCall {
             id: payload.call_id.clone(),
@@ -784,7 +825,10 @@ impl ThreadHistoryBuilder {
         let receiver_id = payload.receiver_thread_id.to_string();
         let agents_states = [(
             receiver_id.clone(),
-            CollabAgentState::from(payload.status.clone()),
+            CollabAgentState::from(payload.status.clone()).with_agent_metadata(
+                payload.receiver_agent_nickname.clone(),
+                payload.receiver_agent_role.clone(),
+            ),
         )]
         .into_iter()
         .collect();
@@ -830,7 +874,10 @@ impl ThreadHistoryBuilder {
         let receiver_id = payload.receiver_thread_id.to_string();
         let agents_states = [(
             receiver_id.clone(),
-            CollabAgentState::from(payload.status.clone()),
+            CollabAgentState::from(payload.status.clone()).with_agent_metadata(
+                payload.receiver_agent_nickname.clone(),
+                payload.receiver_agent_role.clone(),
+            ),
         )]
         .into_iter()
         .collect();
@@ -2999,6 +3046,8 @@ mod tests {
                     CollabAgentState {
                         status: crate::protocol::v2::CollabAgentStatus::Completed,
                         message: None,
+                        agent_nickname: None,
+                        agent_role: None,
                     },
                 )]
                 .into_iter()
@@ -3059,6 +3108,8 @@ mod tests {
                     CollabAgentState {
                         status: crate::protocol::v2::CollabAgentStatus::Running,
                         message: None,
+                        agent_nickname: Some("Scout".into()),
+                        agent_role: Some("explorer".into()),
                     },
                 )]
                 .into_iter()
@@ -3131,6 +3182,8 @@ mod tests {
                     CollabAgentState {
                         status: crate::protocol::v2::CollabAgentStatus::Interrupted,
                         message: None,
+                        agent_nickname: None,
+                        agent_role: None,
                     },
                 )]
                 .into_iter()

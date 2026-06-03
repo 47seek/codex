@@ -209,6 +209,12 @@ pub(crate) fn tool_call_history_cell(
         .first()
         .and_then(|id| parse_thread_id(id));
     let prompt = prompt.as_deref().unwrap_or_default();
+    let mut metadata_for = |thread_id| {
+        agent_metadata_with_state(
+            agent_metadata(thread_id),
+            agents_states.get(&thread_id.to_string()),
+        )
+    };
 
     match tool {
         CollabAgentTool::SpawnAgent => {
@@ -221,7 +227,7 @@ pub(crate) fn tool_call_history_cell(
                 first_receiver,
                 prompt,
                 spawn_request,
-                &mut agent_metadata,
+                &mut metadata_for,
             ))
         }
         CollabAgentTool::SendInput => {
@@ -229,30 +235,30 @@ pub(crate) fn tool_call_history_cell(
                 return None;
             }
             first_receiver.map(|receiver_thread_id| {
-                interaction_end(receiver_thread_id, prompt, &mut agent_metadata)
+                interaction_end(receiver_thread_id, prompt, &mut metadata_for)
             })
         }
         CollabAgentTool::ResumeAgent => first_receiver.map(|receiver_thread_id| {
             if matches!(status, CollabAgentToolCallStatus::InProgress) {
-                resume_begin(receiver_thread_id, &mut agent_metadata)
+                resume_begin(receiver_thread_id, &mut metadata_for)
             } else {
                 let state = first_agent_state(receiver_thread_ids, agents_states);
                 resume_end(
                     receiver_thread_id,
                     state,
                     "Agent resume failed",
-                    &mut agent_metadata,
+                    &mut metadata_for,
                 )
             }
         }),
         CollabAgentTool::Wait => {
             if matches!(status, CollabAgentToolCallStatus::InProgress) {
-                Some(waiting_begin(receiver_thread_ids, &mut agent_metadata))
+                Some(waiting_begin(receiver_thread_ids, &mut metadata_for))
             } else {
                 Some(waiting_end(
                     receiver_thread_ids,
                     agents_states,
-                    &mut agent_metadata,
+                    &mut metadata_for,
                 ))
             }
         }
@@ -261,7 +267,7 @@ pub(crate) fn tool_call_history_cell(
                 return None;
             }
             first_receiver
-                .map(|receiver_thread_id| close_end(receiver_thread_id, &mut agent_metadata))
+                .map(|receiver_thread_id| close_end(receiver_thread_id, &mut metadata_for))
         }
     }
 }
@@ -431,6 +437,32 @@ fn agent_label(thread_id: ThreadId, metadata: &AgentMetadata) -> AgentLabel<'_> 
         nickname: metadata.agent_nickname.as_deref(),
         role: metadata.agent_role.as_deref(),
     }
+}
+
+fn agent_metadata_with_state(
+    mut metadata: AgentMetadata,
+    state: Option<&CollabAgentState>,
+) -> AgentMetadata {
+    let Some(state) = state else {
+        return metadata;
+    };
+    if state
+        .agent_nickname
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|nickname| !nickname.is_empty())
+    {
+        metadata.agent_nickname = state.agent_nickname.clone();
+    }
+    if state
+        .agent_role
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|role| !role.is_empty())
+    {
+        metadata.agent_role = state.agent_role.clone();
+    }
+    metadata
 }
 
 fn agent_label_line(agent: AgentLabel<'_>) -> Line<'static> {
@@ -821,6 +853,59 @@ mod tests {
     }
 
     #[test]
+    fn wait_begin_uses_state_metadata_when_cache_is_empty() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let hypatia_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid hypatia thread id");
+        let harvey_id = ThreadId::from_string("00000000-0000-0000-0000-000000000003")
+            .expect("valid harvey thread id");
+
+        let cell = tool_call_history_cell(
+            &ThreadItem::CollabAgentToolCall {
+                id: "call-wait".to_string(),
+                tool: CollabAgentTool::Wait,
+                status: CollabAgentToolCallStatus::InProgress,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![hypatia_id.to_string(), harvey_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::from([
+                    (
+                        hypatia_id.to_string(),
+                        CollabAgentState {
+                            status: CollabAgentStatus::Running,
+                            message: None,
+                            agent_nickname: Some("Hypatia".to_string()),
+                            agent_role: Some("explorer".to_string()),
+                        },
+                    ),
+                    (
+                        harvey_id.to_string(),
+                        CollabAgentState {
+                            status: CollabAgentStatus::Running,
+                            message: None,
+                            agent_nickname: Some("Harvey".to_string()),
+                            agent_role: Some("default".to_string()),
+                        },
+                    ),
+                ]),
+            },
+            /*cached_spawn_request*/ None,
+            |_| AgentMetadata::default(),
+        )
+        .expect("wait begin item renders");
+
+        let text = cell_to_text(&cell);
+        assert!(text.contains("Waiting for 2 agents"));
+        assert!(text.contains("Hypatia [explorer]"));
+        assert!(text.contains("Harvey [default]"));
+        assert!(!text.contains(&hypatia_id.to_string()));
+        assert!(!text.contains(&harvey_id.to_string()));
+    }
+
+    #[test]
     fn collab_resume_interrupted_snapshot() {
         let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
             .expect("valid sender thread id");
@@ -854,6 +939,8 @@ mod tests {
         CollabAgentState {
             status,
             message: message.map(str::to_string),
+            agent_nickname: None,
+            agent_role: None,
         }
     }
 
